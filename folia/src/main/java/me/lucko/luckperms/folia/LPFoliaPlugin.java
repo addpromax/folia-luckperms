@@ -27,12 +27,24 @@ package me.lucko.luckperms.folia;
 
 import me.lucko.luckperms.bukkit.BukkitCommandExecutor;
 import me.lucko.luckperms.bukkit.LPBukkitPlugin;
+import me.lucko.luckperms.bukkit.inject.permissible.LuckPermsPermissible;
+import me.lucko.luckperms.bukkit.inject.permissible.PermissibleInjector;
 import me.lucko.luckperms.bukkit.inject.permissible.PermissibleMonitoringInjector;
 import me.lucko.luckperms.bukkit.inject.server.InjectorDefaultsMap;
 import me.lucko.luckperms.bukkit.inject.server.InjectorPermissionMap;
 import me.lucko.luckperms.bukkit.inject.server.InjectorSubscriptionMap;
+import me.lucko.luckperms.bukkit.listeners.BukkitAutoOpListener;
+import me.lucko.luckperms.bukkit.listeners.BukkitCommandListUpdater;
 import me.lucko.luckperms.bukkit.util.PluginManagerUtil;
+import me.lucko.luckperms.common.command.access.CommandPermission;
+import me.lucko.luckperms.common.config.ConfigKeys;
+import me.lucko.luckperms.common.model.User;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.entity.Player;
+import org.bukkit.permissions.Permission;
+import org.bukkit.permissions.PermissionDefault;
+import org.bukkit.plugin.PluginManager;
 
 /**
  * LuckPerms implementation for the Folia API.
@@ -90,6 +102,62 @@ public class LPFoliaPlugin extends LPBukkitPlugin {
 
         // Provide vault support
         tryVaultHook(false);
+    }
+
+    @Override
+    protected void performFinalSetup() {
+        // register permissions
+        PluginManager pluginManager = this.bootstrap.getServer().getPluginManager();
+        PermissionDefault permDefault = getConfiguration().get(ConfigKeys.COMMANDS_ALLOW_OP) ? PermissionDefault.OP : PermissionDefault.FALSE;
+
+        for (CommandPermission permission : CommandPermission.values()) {
+            Permission bukkitPermission = new Permission(permission.getPermission(), permDefault);
+            pluginManager.removePermission(bukkitPermission);
+            pluginManager.addPermission(bukkitPermission);
+        }
+
+        // remove all operators on startup if they're disabled
+        if (!getConfiguration().get(ConfigKeys.OPS_ENABLED)) {
+            // Use Folia's async scheduler instead of Bukkit's
+            this.bootstrap.getScheduler().executeAsync(() -> {
+                for (OfflinePlayer player : this.bootstrap.getServer().getOperators()) {
+                    player.setOp(false);
+                }
+            });
+        }
+
+        // register autoop listener
+        if (getConfiguration().get(ConfigKeys.AUTO_OP)) {
+            getApiProvider().getEventBus().subscribe(new BukkitAutoOpListener(this));
+        }
+
+        // register bukkit command list updater
+        if (getConfiguration().get(ConfigKeys.UPDATE_CLIENT_COMMAND_LIST) && BukkitCommandListUpdater.isSupported()) {
+            getApiProvider().getEventBus().subscribe(new BukkitCommandListUpdater(this));
+        }
+
+        // Load any online users (in the case of a reload)
+        for (Player player : this.bootstrap.getServer().getOnlinePlayers()) {
+            this.bootstrap.getScheduler().executeAsync(() -> {
+                try {
+                    User user = this.connectionListener.loadUser(player.getUniqueId(), player.getName());
+                    if (user != null) {
+                        this.bootstrap.getScheduler().executeSync(() -> {
+                            try {
+                                LuckPermsPermissible lpPermissible = new LuckPermsPermissible(player, user, this);
+                                PermissibleInjector.inject(player, lpPermissible, getLogger());
+                            } catch (Throwable t) {
+                                getLogger().severe("Exception thrown when setting up permissions for " +
+                                        player.getUniqueId() + " - " + player.getName(), t);
+                            }
+                        });
+                    }
+                } catch (Exception e) {
+                    getLogger().severe("Exception occurred whilst loading data for " +
+                            player.getUniqueId() + " - " + player.getName(), e);
+                }
+            });
+        }
     }
 
 }
